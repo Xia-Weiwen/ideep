@@ -120,7 +120,9 @@ private:
      }
      
      // determine dst data type
-     if (dst_scales.empty() || dst_scales == IDEEP_DEF_SCALE) {
+     if (dst.get_data_type() != data_type::undef) {
+       dst_data_type = dst.get_data_type();
+     } else if (dst_scales.empty() || dst_scales == IDEEP_DEF_SCALE) {
        dst_data_type = data_type::f32;
      } else {
        dst_data_type = data_type::u8;
