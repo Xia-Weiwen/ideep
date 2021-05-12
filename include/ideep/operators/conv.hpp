@@ -472,7 +472,7 @@ private:
       }
 
       if (with_bias) {
-        bias_desc = {bias.get_dims(), data_type::s32, tag::any};
+        bias_desc = {bias.get_dims(), data_type::f32, tag::any}; // to avoid precision loss for quantization
         if (bias.get_data_type() == data_type::f32) {
           bias_attr = {utils::tensor_scale_mask(scale_size, false),
                        bias_scales};
@@ -537,8 +537,9 @@ private:
     }
 
     if (with_bias) {
-      auto expected_bias =
-          bias.reorder_if_differ_in(pd.bias_desc(), param.bias_attr);
+      ideep::tensor expected_bias;
+      expected_bias.init(pd.bias_desc());
+      bias.reorder_to(expected_bias, param.bias_attr); // reorder_if_differ_in does not check attr
       super(pd).execute(stream::default_stream(), 
                         {{DNNL_ARG_SRC, expected_src},
                          {DNNL_ARG_WEIGHTS, expected_weights},
