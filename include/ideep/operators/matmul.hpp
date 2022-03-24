@@ -3,12 +3,55 @@
 
 namespace ideep {
 
+struct matmul_forward_params {
+  dnnl::matmul::primitive_desc pd;
+  dnnl::matmul primitive;
+  attr_t op_attr;
+  // bias_attr contains requantization scales for bias
+  attr_t bias_attr;
+  scale_t dst_scales;
+  attr_t src_attr;
+  attr_t weights_attr;
+};
+
 struct matmul_forward : public dnnl::matmul,
                         utils::computation_cache<dnnl::matmul::primitive_desc> {
   using super = dnnl::matmul;
 
-  // With bias
+  // With or without bias
   // Zero points are passed explicitly as arguments for quantization
+  static void compute_v2(
+      const tensor& src,
+      const tensor& weights,
+      const tensor& bias,
+      bool with_bias,
+      tensor& dst,
+      const float dst_coeff = 1.0f,
+      const float sum_coeff = 1.0f,
+      const scale_t& src_scales = scale_t(),
+      const scale_t& weights_scales = scale_t(),
+      const scale_t& dst_scales = scale_t(),
+      const zero_point_t& src_zero_points = zero_point_t(),
+      const zero_point_t& dst_zero_points = zero_point_t(),
+      const attr_t& attr = attr_t(),
+      const data_type dst_type = data_type::undef,
+      const lowp_kind alowp_kind = u8s8,
+      const engine& aengine = engine::cpu_engine()) {
+    if (with_bias) {
+      compute_impl</*with_bias=*/true>(src, weights, bias, dst, dst_coeff, sum_coeff,
+                                       src_scales, weights_scales, dst_scales,
+                                       src_zero_points, dst_zero_points,
+                                       attr, dst_type, alowp_kind, aengine);
+    } else {
+      compute_impl</*with_bias=*/false>(src, weights, bias, dst, dst_coeff,
+                                        sum_coeff, src_scales, weights_scales, dst_scales,
+                                        src_zero_points, dst_zero_points,
+                                        attr, dst_type, alowp_kind, aengine);
+    }
+  }
+
+  // Deprecated
+  // With bias. Zero points are passed explicitly as arguments for quantization
   static void compute_v2(
       const tensor& src,
       const tensor& weights,
@@ -31,8 +74,8 @@ struct matmul_forward : public dnnl::matmul,
                                      attr, dst_type, alowp_kind, aengine);
   }
 
-  // Without bias
-  // Zero points are passed explicitly as arguments for quantization
+  // Deprecated
+  // Without bias. Zero points are passed explicitly as arguments for quantization
   static void compute_v2(
       const tensor& src,
       const tensor& weights,
@@ -95,6 +138,37 @@ struct matmul_forward : public dnnl::matmul,
                                       sum_coeff, src_scales, weights_scales, dst_scales,
                                       zero_point_t(), zero_point_t(),
                                       attr, dst_type, alowp_kind, aengine);
+  }
+
+  static void prepare(matmul_forward_params& param,
+                      const tensor& src,
+                      const tensor& weights,
+                      const tensor& bias,
+                      bool with_bias,
+                      tensor& dst,
+                      const float dst_coeff = 1.0f,
+                      const float sum_coeff = 1.0f,
+                      const scale_t& src_scales = scale_t(),
+                      const scale_t& weights_scales = scale_t(),
+                      const scale_t& dst_scales = scale_t(),
+                      const zero_point_t& src_zero_points = zero_point_t(),
+                      const zero_point_t& dst_zero_points = zero_point_t(),
+                      const attr_t& attr = attr_t(),
+                      const data_type dst_type = data_type::undef,
+                      const lowp_kind alowp_kind = u8s8,
+                      const engine& aengine = engine::cpu_engine()) {
+    do_prepare(param, src, weights, bias, with_bias, dst, dst_coeff, sum_coeff,
+               src_scales, weights_scales, dst_scales, src_zero_points, dst_zero_points,
+               attr, dst_type, alowp_kind, aengine);
+  }
+
+  static void compute(const matmul_forward_params& param,
+                      const tensor& src,
+                      const tensor& weights,
+                      const tensor& bias,
+                      bool with_bias,
+                      tensor& dst) {
+    do_compute(param, src, weights, bias, with_bias, dst);
   }
 
   static tensor::desc expected_weights_desc(
@@ -381,6 +455,247 @@ private:
      dst.feed_from(expected_dst);
    }
   }
+
+ static void do_prepare(matmul_forward_params& param,
+                        const tensor& src,
+                        const tensor& weights,
+                        const tensor& bias,
+                        bool with_bias,
+                        tensor& dst,
+                        const float dst_coeff = 1.0f,
+                        const float sum_coeff = 1.0f,
+                        const scale_t& src_scales = scale_t(),
+                        const scale_t& weights_scales = scale_t(),
+                        const scale_t& dst_scales = scale_t(),
+                        const zero_point_t& src_zero_points = zero_point_t(),
+                        const zero_point_t& dst_zero_points = zero_point_t(),
+                        const attr_t& attr = attr_t(),
+                        const data_type dst_type = data_type::undef,
+                        const lowp_kind alowp_kind = u8s8,
+                        const engine& aengine = engine::cpu_engine()) {
+   IDEEP_ENFORCE(src.ndims() == weights.ndims(), "Invalid dims in src or weights");
+
+   tensor::desc src_desc, weights_desc, bias_desc;
+   attr_t op_attr = attr, src_attr, weights_attr, bias_attr;
+   scale_t dst_scales_in;
+   auto dst_data_type = data_type::f32;
+
+   tensor::dims dst_dims = {src.get_dim(0), weights.get_dim(1)};
+   auto ndims = weights.ndims();
+   if (ndims == 3)
+       dst_dims = {src.get_dim(0), src.get_dim(1), weights.get_dim(2)};
+
+   auto& weights_scales_in =
+       weights.has_scale() ? weights.get_scale() : weights_scales;
+   if (!weights_scales_in.empty()) {
+     IDEEP_ENFORCE(alowp_kind == u8s8 || alowp_kind == s8s8,
+                   "Unsupported lowp kind");
+
+     auto src_scales_in =
+         src.has_scale() ? src.get_scale()
+                         : (src_scales.empty() ? IDEEP_DEF_SCALE : src_scales);
+     src_desc = {src.get_dims(),
+                 alowp_kind == u8s8 ? data_type::u8 : data_type::s8,
+                 tag::any};
+     if (src.get_data_type() == data_type::f32) {
+       src_attr = {0, src_scales_in};
+     }
+
+     int scale_size = (weights_scales_in.size() > 1) ? weights.get_dim(1) : 1;
+     weights_desc = weights.get_desc();
+     if (weights.get_data_type() == data_type::f32) {
+       weights_attr = {utils::tensor_scale_mask(scale_size, false),
+                       weights_scales_in};
+     }
+
+     // determine dst data type
+     if (dst.get_data_type() != data_type::undef) {
+       dst_data_type = dst.get_data_type();
+     } else if (dst_scales.empty() || dst_scales == IDEEP_DEF_SCALE) {
+       dst_data_type = data_type::f32;
+     } else {
+       dst_data_type = data_type::u8;
+     }
+
+     // fill primitive attr
+     scale_t op_scales(scale_size), bias_scales(scale_size);
+     dst_scales_in = (dst_scales.empty() || dst_data_type == data_type::f32)
+                          ? IDEEP_DEF_SCALE
+                          : dst_scales;
+     const zero_point_t default_zero_points = zero_point_t(1);
+     const auto& src_zero_point = src.has_zero_point() ? src.get_zero_point() :
+                                  src_zero_points.empty() ? default_zero_points : src_zero_points;
+     const auto src_zero_point_size = static_cast<dim>(src_zero_point.size());
+     const auto& dst_zero_point = dst.has_zero_point() ? dst.get_zero_point() :
+         dst_zero_points.empty() ? default_zero_points : dst_zero_points;
+     const auto dst_zero_point_size = static_cast<dim>(dst_zero_point.size());
+     IDEEP_ENFORCE(src_zero_point_size == 1 && dst_zero_point_size == 1,
+                   "DNNL only support 1-dim zero_point");
+     const auto& wei_zero_point = weights.has_zero_point() ?
+                                  weights.get_zero_point() : default_zero_points;
+     const dim wei_zero_point_size = 1;
+
+     if (attr.has_op_kind(kind::sum)) {
+       float sum_scale =
+           sum_coeff * dst_scales_in[0] / (dst.has_scale() ? dst.get_scale()[0] : 1.0f);
+       op_attr = attr_t::fuse_sum(sum_scale);
+     }
+
+     auto bias_scales_in =
+         bias.has_scale() ? bias.get_scale() : IDEEP_DEF_SCALE;
+     bias_scales_in = bias_scales_in.size() == 1 ?
+	     std::vector<float>(scale_size, bias_scales_in[0]) : bias_scales_in;
+
+     for (int i = 0; i < scale_size; i++) {
+       bias_scales[i] = src_scales_in[0] * weights_scales_in[i]
+                        / (dst_coeff * bias_scales_in[i]);
+       op_scales[i] = dst_coeff * dst_scales_in[0] / (src_scales_in[0] * weights_scales_in[i]);
+     }
+     op_attr.set_output_scales(utils::op_scale_mask(scale_size), op_scales);
+     op_attr.set_zero_points(DNNL_ARG_SRC,
+                             utils::tensor_zp_mask(src_zero_point.size()), src_zero_point);
+     if (src.get_data_type() == data_type::f32) {
+       // Set zero point for reorder (quantization). 1st arg should be DNNL_ARG_DST rather than DNNL_ARG_SRC
+       src_attr.set_zero_points(DNNL_ARG_DST,
+                                utils::tensor_zp_mask(src_zero_point.size()), src_zero_point);
+     }
+     op_attr.set_zero_points(DNNL_ARG_WEIGHTS,
+                             utils::tensor_zp_mask(1), zero_point_t(1,wei_zero_point[0]));
+     if (dst_data_type != data_type::f32) {
+       op_attr.set_zero_points(DNNL_ARG_DST,
+                               utils::tensor_zp_mask(dst_zero_point.size()), dst_zero_point);
+     }
+
+     if (with_bias) {
+       tag bia_tag = bias.get_dims().size() == 2 ? tag::ab : tag::abc;
+       bias_desc = {bias.get_dims(), data_type::f32, bia_tag}; // Use f32 instead of s32 to improve accuracy
+       if (bias.get_data_type() != data_type::s32) {
+         auto ndims = bias.get_dims().size();
+         int mask = scale_size > 1 ? 1 << (ndims - 1) : 0;
+         bias_attr = {mask, bias_scales};
+       }
+     }
+   } else {
+     if (src.has_scale()) {
+       auto src_scale = src.get_scale();
+       src_scale[0] = 1.0f / src_scale[0];
+       src_attr = {0, src_scale};
+     }
+
+     // We intentionally didn't set weight desc to format `any` so DNNL wouldn't
+     // have to determine weight format for us. Because the weight tensor from
+     // pytorch may have a transposed format (say `ba`). However, DNNL would
+     // choose plain format for it by default (`ab` in this case), which would
+     // introduces *an extra reorder* afterwards. Here we keep the weight format
+     // untouched thanks to optimizations for both plain and transposed formats
+     // in DNNL.
+     IDEEP_ENFORCE(weights.get_data_type() == data_type::f32 ||
+		   weights.get_data_type() == data_type::bf16,
+                   "Incorrect data type in weights");
+     dst_data_type = src.get_data_type() == data_type::bf16 ?
+                     data_type::bf16 : data_type::f32;
+     src_desc = src.get_desc().to_type(dst_data_type);
+     weights_desc = weights.get_desc().to_type(dst_data_type);
+     if (with_bias) {
+       IDEEP_ENFORCE(bias.get_data_type() == data_type::f32 ||
+		     bias.get_data_type() == data_type::bf16,
+                     "Incorrect data type in bias");
+       bias_desc = bias.get_desc().to_format_any();
+       auto bias_scales = scale_t(1, 1.0 / dst_coeff);
+       bias_attr = {utils::tensor_scale_mask(1, false), bias_scales};
+     }
+
+     if (attr.has_op_kind(kind::sum)) {
+       op_attr = attr_t::fuse_sum(sum_coeff);
+     }
+     int scale_size = 1;
+     op_attr.set_output_scales(utils::op_scale_mask(scale_size),
+		               std::vector<float>(1, dst_coeff));
+   }
+
+   dst_data_type = dst_type == data_type::undef ? dst_data_type : dst_type;
+   tensor::desc dst_desc(dst_dims, dst_data_type, tag::any);
+   auto key = utils::create_key(
+       src_desc,
+       weights_desc,
+       bias_desc,
+       dst_desc,
+       op_attr,
+       with_bias,
+       omp_get_max_threads());
+   auto pd = fetch_or_create(key, [&]() {
+     if (with_bias) {
+       return primitive_desc(
+           {src_desc, weights_desc, bias_desc, dst_desc}, op_attr, aengine);
+     } else {
+       return primitive_desc(
+           {src_desc, weights_desc, dst_desc}, op_attr, aengine);
+     }
+   });
+   param.pd = std::move(pd);
+   param.primitive = std::move(super(param.pd));
+   param.op_attr = std::move(op_attr);
+   param.src_attr = std::move(src_attr);
+   param.weights_attr = std::move(weights_attr);
+   param.bias_attr = std::move(bias_attr);
+   param.dst_scales = std::move(dst_scales_in);
+ }
+
+ static void do_compute(const matmul_forward_params& param,
+                        const tensor& src,
+                        const tensor& weights,
+                        const tensor& bias,
+                        bool with_bias,
+                        tensor& dst) {
+   auto& pd = param.pd;
+   auto& matmul = param.primitive;
+   auto& op_attr = param.op_attr;
+   auto& src_attr = param.src_attr;
+   auto& weights_attr = param.weights_attr;
+   auto& bias_attr = param.bias_attr;
+   auto& dst_scales_in = param.dst_scales;
+   auto expected_src = src.reorder_if_differ_in(pd.src_desc(), src_attr);
+   auto expected_weights = weights.reorder_if_differ_in(pd.weights_desc(), weights_attr);
+   tensor expected_dst;
+   if (dst.is_empty() || dst.get_desc() != pd.dst_desc()) {
+     // If dst buffer are not given by user or user given dst buffer are not under expected format
+     // We need init a new one
+     expected_dst.init(pd.dst_desc());
+     if (!dst.is_empty() && op_attr.has_op_kind(kind::sum)) {
+       // We need copy the content of given buffer if matmul is fused with sum
+       expected_dst.feed_from(dst);
+     }
+   } else {
+     // The format of given dst buffer is expected
+     expected_dst = dst;
+   }
+
+   if (!dst_scales_in.empty() && utils::one_of(dst.get_data_type(), data_type::u8, data_type::s8)) {
+     expected_dst.set_scale(dst_scales_in);
+   }
+   if (with_bias){
+     auto expected_bias = bias.reorder_if_differ_in(pd.bias_desc(), bias_attr);
+     matmul.execute(stream::default_stream(),
+                    {{DNNL_ARG_SRC, expected_src},
+                     {DNNL_ARG_WEIGHTS, expected_weights},
+                     {DNNL_ARG_BIAS, expected_bias},
+                     {DNNL_ARG_DST, expected_dst}});
+   } else {
+     matmul.execute(stream::default_stream(),
+                    {{DNNL_ARG_SRC, expected_src},
+                     {DNNL_ARG_WEIGHTS, expected_weights},
+                     {DNNL_ARG_DST, expected_dst}});
+   }
+   // reorder back to dst's buffer if needed
+   if (dst.is_empty() ||
+         dst.get_desc() == expected_dst.get_desc() ||
+         !dst.get_desc().has_same_shape_as(expected_dst.get_desc())){
+     dst =  expected_dst;
+   } else {
+     dst.feed_from(expected_dst);
+   }
+  }
+
 };
 
 }  // namespace ideep

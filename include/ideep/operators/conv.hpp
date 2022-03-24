@@ -223,7 +223,44 @@ struct convolution_forward
 
   using super = dnnl::convolution_forward;
 
-  // 2-in-1 compute (prepare & compute) with bias
+  // 2-in-1 compute (prepare & compute) w/ or w/o bias
+  // Zero points are passed explicitly as arguments for quantization
+  template <bool plain_format = false>
+  static void compute_v2(const tensor& src,
+                         const tensor& weights,
+                         const tensor& bias,
+                         bool with_bias,
+                         const dims& dst_dims,
+                         tensor& dst,
+                         const dims& strides,
+                         const dims& dilates,
+                         const dims& padding_l,
+                         const dims& padding_r,
+                         int groups,
+                         const scale_t& src_scales = scale_t(),
+                         const scale_t& weights_scales = scale_t(),
+                         const scale_t& dst_scales = scale_t(),
+                         const zero_point_t& src_zero_point = zero_point_t(),
+                         const zero_point_t& dst_zero_point = zero_point_t(),
+                         const attr_t& attr = attr_t(),
+                         algorithm aalgorithm = algorithm::convolution_direct,
+                         prop_kind aprop_kind = prop_kind::forward,
+                         const lowp_kind alowp_kind = u8s8,
+                         const engine& aengine = engine::cpu_engine()) {
+    if (with_bias) {
+      compute_dispatch</*with_bias=*/true, plain_format>(
+          src, weights, bias, dst_dims, dst, strides, dilates,
+          padding_l, padding_r, groups, src_scales, weights_scales, dst_scales,
+          src_zero_point, dst_zero_point, attr, aalgorithm, aprop_kind, alowp_kind, aengine);
+    } else {
+      compute_dispatch</*with_bias=*/false, plain_format>(
+          src, weights, bias, dst_dims, dst, strides, dilates,
+          padding_l, padding_r, groups, src_scales, weights_scales, dst_scales,
+          src_zero_point, dst_zero_point, attr, aalgorithm, aprop_kind, alowp_kind, aengine);
+    }
+  }
+
+  // Deprecated. 2-in-1 compute (prepare & compute) with bias
   // Zero points are passed explicitly as arguments for quantization
   template <bool plain_format = false>
   static void compute_v2(const tensor& src,
@@ -252,7 +289,7 @@ struct convolution_forward
         src_zero_point, dst_zero_point, attr, aalgorithm, aprop_kind, alowp_kind, aengine);
   }
 
-  // 2-in-1 compute (prepare & compute) without bias
+  // Deprecated. 2-in-1 compute (prepare & compute) without bias
   // Zero points are passed explicitly as arguments for quantization
   template <bool plain_format = false>
   static void compute_v2(const tensor& src,
@@ -281,7 +318,45 @@ struct convolution_forward
         src_zero_point, dst_zero_point, attr, aalgorithm, aprop_kind, alowp_kind, aengine);
   }
 
-  // Deprecated. Prepare with bias.
+  // Prepare with or without bias.
+  // Zero points are set to tensor for quantization
+  static void prepare(
+      convolution_forward_params& param,
+      const tensor& src,
+      const tensor& weights,
+      const tensor& bias,
+      bool with_bias,
+      const dims& dst_dims,
+      tensor& dst,
+      const dims& strides,
+      const dims& dilates,
+      const dims& padding_l,
+      const dims& padding_r,
+      int groups,
+      const scale_t& src_scales = scale_t(),
+      const scale_t& weights_scales = scale_t(),
+      const scale_t& dst_scales = scale_t(),
+      const zero_point_t& src_zero_point = zero_point_t(),
+      const zero_point_t& dst_zero_point = zero_point_t(),
+      const attr_t& attr = attr_t(),
+      algorithm aalgorithm = algorithm::convolution_direct,
+      prop_kind aprop_kind = prop_kind::forward,
+      const lowp_kind alowp_kind = u8s8,
+      const engine& aengine = engine::cpu_engine()) {
+    if (with_bias) {
+      do_prepare</*with_bias=*/true, /*keep_format=*/false>(
+          param, src, weights, bias, dst_dims, dst, strides, dilates,
+          padding_l, padding_r, groups, src_scales, weights_scales, dst_scales,
+          src_zero_point, dst_zero_point, attr, aalgorithm, aprop_kind, alowp_kind, aengine);
+    } else {
+      do_prepare</*with_bias=*/false, /*keep_format=*/false>(
+          param, src, weights, bias, dst_dims, dst, strides, dilates,
+          padding_l, padding_r, groups, src_scales, weights_scales, dst_scales,
+          src_zero_point, dst_zero_point, attr, aalgorithm, aprop_kind, alowp_kind, aengine);
+    }
+  }
+
+  // Prepare with bias.
   // Zero points are set to tensor for quantization
   static void prepare(
       convolution_forward_params& param,
@@ -309,7 +384,7 @@ struct convolution_forward
         zero_point_t(), zero_point_t(), attr, aalgorithm, aprop_kind, alowp_kind, aengine);
   }
 
-  // Deprecated. Prepare without bias.
+  // Prepare without bias.
   // Zero points are set to tensor for quantization
   static void prepare(
       convolution_forward_params& param,
@@ -353,6 +428,25 @@ struct convolution_forward
                       tensor& dst) {
     static tensor dummy_bias;
     do_compute</*with_bias=*/false>(param, src, weights, dummy_bias, dst);
+  }
+
+  // Compute with given primitive & src zero point with or without bias
+  static void compute(const dnnl::convolution_forward::primitive_desc pd,
+                      const super& primitive,
+                      const tensor& src,
+                      const tensor& weights,
+                      const tensor& expected_bias,
+                      bool with_bias,
+                      tensor& dst,
+                      const tensor& src_zero_point,
+                      int groups) {
+    if (with_bias) {
+      do_compute</*with_bias=*/true>(
+          pd, primitive, src, weights, expected_bias, dst, src_zero_point, groups);
+    } else {
+      do_compute</*with_bias=*/false>(
+          pd, primitive, src, weights, expected_bias, dst, src_zero_point, groups);
+    }
   }
 
   // Deprecated. 2-in-1 compute (prepare & compute) with bias
@@ -753,6 +847,37 @@ private:
                          {DNNL_ARG_DST, dst},
                          {DNNL_ARG_SCRATCHPAD, scratchpad},
                          {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zero_point_m}});
+    }
+  }
+
+  // Do_compute with given primitive & src zero point
+  // Bias scale has been applied before passed in.
+  template <bool with_bias>
+  static void do_compute(const dnnl::convolution_forward::primitive_desc& pd,
+                         const super& primitive,
+                         const tensor& src,
+                         const tensor& weights,
+                         const tensor& expected_bias,
+                         tensor& dst,
+                         const tensor& src_zero_point,
+                         int groups) {
+    auto scratchpad = tensor(pd.scratchpad_desc());
+    auto weights_grouped = weights.make_grouped_weights(groups);
+    if (with_bias) {
+      primitive.execute(stream::default_stream(),
+                        {{DNNL_ARG_SRC, src},
+                         {DNNL_ARG_WEIGHTS, weights_grouped},
+                         {DNNL_ARG_BIAS, expected_bias},
+                         {DNNL_ARG_DST, dst},
+                         {DNNL_ARG_SCRATCHPAD, scratchpad},
+                         {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zero_point}});
+    } else {
+      primitive.execute(stream::default_stream(),
+                        {{DNNL_ARG_SRC, src},
+                         {DNNL_ARG_WEIGHTS, weights_grouped},
+                         {DNNL_ARG_DST, dst},
+                         {DNNL_ARG_SCRATCHPAD, scratchpad},
+                         {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zero_point}});
     }
   }
 };
