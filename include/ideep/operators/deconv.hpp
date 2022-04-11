@@ -185,7 +185,7 @@ struct convolution_transpose_forward : public dnnl::deconvolution_forward {
                aalgorithm, aprop_kind, alowp_kind, aengine);
   }
 
-  static void compute(const dnnl::deconvolution_forward& primitive,
+  static void compute(const super& primitive,
                       const tensor& src,
                       const tensor& weights,
                       const tensor& expected_bias,
@@ -444,7 +444,7 @@ struct convolution_transpose_forward : public dnnl::deconvolution_forward {
     param.groups = groups;
   }
 
-  static void do_compute(const dnnl::deconvolution_forward& primitive,
+  static void do_compute(const super& primitive,
                          const tensor& src,
                          const tensor& weights,
                          const tensor& expected_bias,

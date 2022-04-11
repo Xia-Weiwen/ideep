@@ -431,7 +431,7 @@ struct convolution_forward
   }
 
   // Compute with given primitive & src zero point with or without bias
-  static void compute(const dnnl::convolution_forward::primitive_desc pd,
+  static void compute(const super::primitive_desc pd,
                       const super& primitive,
                       const tensor& src,
                       const tensor& weights,
@@ -853,7 +853,7 @@ private:
   // Do_compute with given primitive & src zero point
   // Bias scale has been applied before passed in.
   template <bool with_bias>
-  static void do_compute(const dnnl::convolution_forward::primitive_desc& pd,
+  static void do_compute(const super::primitive_desc& pd,
                          const super& primitive,
                          const tensor& src,
                          const tensor& weights,
